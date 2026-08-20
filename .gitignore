@@ -1,0 +1,24 @@
+# Environnement virtuel
+.venv/
+
+# Logs serveur / bench
+*.log
+sglang.log
+
+# Caches Python / compilation
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Caches runtime (Hugging Face / Triton / torch)
+.cache/
+.triton/
+
+# Artefacts SGLang
+sglang_storage/
+.sglang.pid
+
+# Divers
+.DS_Store
