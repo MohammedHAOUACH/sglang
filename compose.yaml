@@ -20,7 +20,7 @@
 #   (262144), MEM_FRACTION (0.95), MAX_CONCURRENT_REQUESTS (1),
 #   ATTN_BACKEND (flashinfer), SERVED_MODEL_NAME (qwen3.8-27b-int8-w8a16),
 #   MODEL_ROOT (OBLIGATOIRE), MODEL_SNAPSHOT (7c12373712d1363e2b76655cb3332c9c124627d7),
-#   MAMBA_CACHE_SIZE (4), SGLANG_IMAGE (lmsysorg/sglang:latest)
+#   SGLANG_MAMBA_CACHE_SIZE (8), SGLANG_IMAGE (lmsysorg/sglang:latest)
 # ============================================================================
 
 name: sglang-qwen3
@@ -98,8 +98,15 @@ services:
       - "4.21"
       - --mamba-radix-cache-strategy
       - extra_buffer_lazy
+      # 8 = 4 slots/requête (concurrence 1) + 4 de marge radix : le handoff
+      # du cache radix exige un slot Mamba supplémentaire, et avec 4 slots
+      # seulement l'éviction échoue quand le préfixe partagé verrouille tous
+      # les états (crash "Can not alloc mamba cache", SIGQUIT).
+      # Chaque slot coûte ~0,07 Go : 8 → KV ~226 K tokens, 16 → ~188 K.
+      # Variable préfixée SGLANG_ : le shell prime sur .env dans docker compose,
+      # donc un export MAMBA_CACHE_SIZE=4 dans le shell écraserait cette valeur.
       - --max-mamba-cache-size
-      - "${MAMBA_CACHE_SIZE:-4}"
+      - "${SGLANG_MAMBA_CACHE_SIZE:-8}"
       - --max-running-requests
       - "${MAX_CONCURRENT_REQUESTS:-1}"
       - --context-length
@@ -124,11 +131,15 @@ services:
       - "${PORT:-1234}"
 
     # 1er boot = compilation JIT + capture CUDA graphs (~5 min à froid).
+    # NB : pendant un prefill très long (gros contexte, requête unique), la
+    # boucle HTTP ne répond pas toujours dans les délais → intervalle/timout
+    # généreux + retries. Un unhealthy temporaire reste sans conséquence
+    # (restart: unless-stopped ne réagit qu'à la sortie du process).
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:1234/health', timeout=5)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:1234/health', timeout=30)"]
+      interval: 60s
+      timeout: 35s
+      retries: 5
       start_period: 300s
 
     stop_grace_period: 60s

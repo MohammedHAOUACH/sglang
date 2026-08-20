@@ -53,9 +53,14 @@ HOST="${HOST:-0.0.0.0}"
 # flashinfer = rapide ; triton = repli si MTP+flashinfer plante au boot
 ATTN_BACKEND="${ATTN_BACKEND:-flashinfer}"
 
-# GDN state pool : slots = concurrency x 4 (extra_buffer_lazy + overlap scheduler)
+# GDN state pool : slots = concurrency x 4 + marge radix (extra_buffer_lazy
+# + overlap scheduler). La marge (4) réduit le risque de crash "Can not alloc
+# mamba cache" (handoff radix d'une requête non finie) sans trop rogner le KV
+# cache : 8 slots → KV ~226 K tokens, 16 → ~188 K, 4 → ~245 K mais crash
+# possible sous charge de gros prompts partagés.
 MAMBA_SLOTS_PER_REQ=4
-MAMBA_CACHE_SIZE=$((MAX_CONCURRENT_REQUESTS * MAMBA_SLOTS_PER_REQ))
+MAMBA_RADIX_HEADROOM=4
+MAMBA_CACHE_SIZE=$((MAX_CONCURRENT_REQUESTS * MAMBA_SLOTS_PER_REQ + MAMBA_RADIX_HEADROOM))
 
 # 2x RTX 3090 sans NVLink (PCIe) : stabilise NCCL comme le setup vLLM.
 export NCCL_P2P_DISABLE=1

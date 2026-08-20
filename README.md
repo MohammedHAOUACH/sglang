@@ -143,7 +143,7 @@ cp .env.example .env
 | `SERVED_MODEL_NAME` | `qwen3.8-27b-int8-w8a16` | Nom exposé par l'API |
 | `MODEL_ROOT` | **obligatoire** | Dossier parent du modèle dans le cache HF (monté dans `/models`) |
 | `MODEL_SNAPSHOT` | hash du snapshot | Sous-dossier pointé par `--model-path` |
-| `MAMBA_CACHE_SIZE` | `4` | Slots du cache GDN (concurrence × 4) |
+| `SGLANG_MAMBA_CACHE_SIZE` | `8` | Slots du cache GDN (concurrence × 4 + 4 de marge radix) — 16 → KV ~188 K (plus sûr), 4 → KV ~245 K (crash possible). Préfixe `SGLANG_` : évite qu'un export shell de `MAMBA_CACHE_SIZE` n'écrase la valeur de `.env` |
 
 > ⚠️ Ne pas faire tourner le venv **et** le conteneur en même temps : le port
 > `1234` ne peut pas être partagé (`./stop.sh` ou changer `PORT` dans `.env`).
@@ -252,6 +252,8 @@ Débit net (méthode delta 2 appels, `bench.py`) :
 | Port `1234` déjà utilisé | serveur venv encore actif → `./stop.sh`, ou changer `PORT` dans `.env` |
 | OOM au démarrage | baisser `MEM_FRACTION` (ex. `0.90`) ou réduire `CONTEXT_LENGTH` |
 | MTP + flashinfer plante au boot | relancer avec `ATTN_BACKEND=triton ./start.sh` |
+| Crash `AssertionError: Can not alloc mamba cache` (SIGQUIT) | pool GDN saturé au handoff radix (gros prompts, préfixe verrouillé) → augmenter `SGLANG_MAMBA_CACHE_SIZE` (8 par défaut ; 16 = plus sûr, KV ~188 K) |
+| `docker compose ps` → `unhealthy` pendant une grosse requête | prefill très long (gros contexte, requête unique) : la boucle HTTP ne répond pas au healthcheck → temporaire et sans conséquence (pas de redémarrage sur unhealthy) ; se rétablit seul |
 
 ---
 
