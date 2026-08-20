@@ -1,0 +1,133 @@
+# SGLang — Qwen3.8-27B-INT8-W8A16-MTP (serveur d'inférence, Docker)
+#
+# Équivalent Docker de start.sh : mêmes arguments launch_server, mêmes
+# réglages réseau/NCCL (2× RTX 3090 sans NVLink), port 1234.
+#
+# Image officielle SGLang (Docker Hub) : lmsysorg/sglang
+#   - "latest"          = dernier stable, CUDA 13, outils de build inclus
+#     (nécessaire : la compilation JIT des kernels GPTQ-Marlin au 1er boot,
+#      comme le ninja du .venv dans start.sh).
+#   - "latest-runtime"  = plus léger (~40 %) mais SANS outils de build → à
+#     éviter ici (pas de compilation JIT possible).
+#   - "latest-cu129"    = variante CUDA 12.9 (si jamais driver hôte < 580).
+#
+# Lancement :  docker compose up -d
+# Arrêt :      docker compose down
+# Logs :       docker compose logs -f sglang
+#
+# Surcharges possibles (défauts = valeurs de start.sh), via .env ou
+# variables d'environnement :
+#   PORT, HOST, TP, CONTEXT_LENGTH, MEM_FRACTION, MAX_CONCURRENT_REQUESTS,
+#   ATTN_BACKEND, SERVED_MODEL_NAME, MODEL_ROOT, MODEL_SNAPSHOT, MAMBA_CACHE_SIZE
+
+name: sglang-qwen3
+
+services:
+  sglang:
+    image: lmsysorg/sglang:latest
+    container_name: sglang-qwen3
+    restart: unless-stopped
+
+    # Recommandé par la doc SGLang pour le TP multi-GPU (KV cache / NCCL).
+    ipc: host
+    shm_size: "32g"
+
+    # Mêmes variables d'environnement que start.sh (2× 3090 en PCIe, pas de
+    # NVLink : stabilise NCCL comme le setup vLLM).
+    environment:
+      NCCL_P2P_DISABLE: "1"
+      NCCL_IB_DISABLE: "1"
+      NCCL_CUMEM_ENABLE: "0"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      TOKENIZERS_PARALLELISM: "false"
+
+    # Le modèle est déjà téléchargé sur l'hôte → montage en lecture seule.
+    # On monte le DOSSIER PARENT (models--lued--...) et non le snapshot :
+    # les fichiers du snapshot sont des liens symboliques relatifs vers
+    # ../../blobs/... qui doivent rester résolus dans le conteneur.
+    volumes:
+      - "${MODEL_ROOT:-/home/yo/Desktop/code/llm/vllm/models/models--lued--Qwen3.8-27B-INT8-W8A16-MTP}:/models:ro"
+
+    ports:
+      - "${PORT:-1234}:${PORT:-1234}"
+
+    # 2 GPU exposés au conteneur (TP = 2).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 2
+              capabilities: [gpu]
+
+    # ====== Équivalent de start.sh (python -m sglang.launch_server) ======
+    command:
+      - python3
+      - -m
+      - sglang.launch_server
+      - --model-path
+      - "/models/snapshots/${MODEL_SNAPSHOT:-7c12373712d1363e2b76655cb3332c9c124627d7}"
+      - --served-model-name
+      - "${SERVED_MODEL_NAME:-qwen3.8-27b-int8-w8a16}"
+      - --tp-size
+      - "${TP:-2}"
+      - --trust-remote-code
+      - --dtype
+      - bfloat16
+      - --disable-custom-all-reduce
+      - --mm-feature-transport
+      - cpu
+      - --mem-fraction-static
+      - "${MEM_FRACTION:-0.95}"
+      - --attention-backend
+      - "${ATTN_BACKEND:-flashinfer}"
+      - --chunked-prefill-size
+      - "8192"
+      - --disable-prefill-cuda-graph
+      - --kv-cache-dtype
+      - fp8_e4m3
+      - --mamba-ssm-dtype
+      - bfloat16
+      - --mamba-full-memory-ratio
+      - "4.21"
+      - --mamba-radix-cache-strategy
+      - extra_buffer_lazy
+      - --max-mamba-cache-size
+      - "${MAMBA_CACHE_SIZE:-4}"
+      - --max-running-requests
+      - "${MAX_CONCURRENT_REQUESTS:-1}"
+      - --context-length
+      - "${CONTEXT_LENGTH:-262144}"
+      - --speculative-algorithm
+      - EAGLE
+      - --speculative-num-steps
+      - "3"
+      - --speculative-eagle-topk
+      - "1"
+      - --speculative-num-draft-tokens
+      - "4"
+      - --reasoning-parser
+      - qwen3
+      - --tool-call-parser
+      - qwen3_coder
+      - --sampling-defaults
+      - model
+      - --host
+      - "${HOST:-0.0.0.0}"
+      - --port
+      - "${PORT:-1234}"
+
+    # 1er boot = compilation JIT + capture CUDA graphs (~5 min à froid).
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:1234/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
+
+    stop_grace_period: 60s
+
+    logging:
+      options:
+        max-size: "50m"
+        max-file: "3"

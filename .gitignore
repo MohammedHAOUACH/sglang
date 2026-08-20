@@ -20,5 +20,8 @@ __pycache__/
 sglang_storage/
 .sglang.pid
 
+# Variables locales docker compose (.env.example est versionné)
+.env
+
 # Divers
 .DS_Store
