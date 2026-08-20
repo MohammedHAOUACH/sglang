@@ -5,11 +5,15 @@ Mesure :
   - débit de décodage net (tok/s) via la méthode delta 2 appels (court/long),
   - TTFT (time-to-first-token) sur un prompt long,
   - mode thinking vs non-thinking.
-"""
-import json, time, urllib.request, urllib.error, uuid, sys
 
-BASE = "http://127.0.0.1:1234/v1/chat/completions"
-MODEL = "qwen3.8-27b-int8-w8a16"
+Configuration par variables d'environnement (défauts entre parenthèses) :
+  SGLANG_BASE_URL (http://127.0.0.1:1234/v1/chat/completions)
+  SGLANG_MODEL    (qwen3.8-27b-int8-w8a16)
+"""
+import json, os, time, urllib.request, urllib.error, uuid, sys
+
+BASE = os.environ.get("SGLANG_BASE_URL", "http://127.0.0.1:1234/v1/chat/completions")
+MODEL = os.environ.get("SGLANG_MODEL", "qwen3.8-27b-int8-w8a16")
 
 
 def call(prompt, max_tokens, thinking=None, temperature=None, stream=False):

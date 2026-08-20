@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+# Lance le serveur SGLang natif (mode venv) — port 1234 par défaut.
+#
+# Portabilité : aucun chemin codé en dur. Le snapshot du modèle est
+# auto-détecté dans le cache Hugging Face local, et le venv est créé
+# automatiquement depuis requirements.txt s'il est absent.
+#
+# Surcharges possibles (défauts entre parenthèses) :
+#   MODEL_PATH          chemin direct vers le snapshot (sinon auto-détection)
+#   MODEL_REPO_DIR      dossier parent du modèle HF (../vllm/models/models--lued--Qwen3.8-27B-INT8-W8A16-MTP)
+#   PORT (1234), HOST (0.0.0.0), TP (2), CONTEXT_LENGTH (262144),
+#   MEM_FRACTION (0.95), MAX_CONCURRENT_REQUESTS (1),
+#   ATTN_BACKEND (flashinfer), SERVED_MODEL_NAME (qwen3.8-27b-int8-w8a16)
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
@@ -6,7 +18,26 @@ VENV="$(pwd)/.venv"
 # .venv/bin sur le PATH : requis pour trouver ninja (compilation JIT des kernels
 # GPTQ-Marlin / flashinfer) et autres binaires du venv.
 export PATH="${VENV}/bin:${PATH}"
-MODEL_PATH="/home/yo/Desktop/code/llm/vllm/models/models--lued--Qwen3.8-27B-INT8-W8A16-MTP/snapshots/7c12373712d1363e2b76655cb3332c9c124627d7"
+
+# --- Modèle (auto-détection si MODEL_PATH non fourni) ----------------------
+MODEL_REPO_DIR="${MODEL_REPO_DIR:-../vllm/models/models--lued--Qwen3.8-27B-INT8-W8A16-MTP}"
+if [[ -z "${MODEL_PATH:-}" ]]; then
+  MODEL_PATH="$(ls -d "${MODEL_REPO_DIR}"/snapshots/*/ 2>/dev/null | head -1 || true)"
+  MODEL_PATH="${MODEL_PATH%/}"
+fi
+if [[ -z "${MODEL_PATH}" || ! -f "${MODEL_PATH}/config.json" ]]; then
+  echo "Erreur : modèle introuvable (MODEL_PATH='${MODEL_PATH}')." >&2
+  echo "  → Définir MODEL_PATH (chemin du snapshot) ou MODEL_REPO_DIR (dossier parent du cache HF)." >&2
+  exit 1
+fi
+
+# --- Venv (création automatique si absent) ---------------------------------
+if [[ ! -x "${VENV}/bin/python" ]]; then
+  echo "Venv absent — création depuis requirements.txt (1 seule fois, ~quelques minutes)..."
+  python3.11 -m venv "${VENV}"
+  "${VENV}/bin/pip" install --upgrade pip
+  "${VENV}/bin/pip" install -r requirements.txt
+fi
 
 # --- Config (surchargable par variables d'environnement) -------------------
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-qwen3.8-27b-int8-w8a16}"
@@ -32,6 +63,9 @@ export NCCL_IB_DISABLE=1
 export NCCL_CUMEM_ENABLE=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
+
+echo "Modèle : ${MODEL_PATH}"
+echo "Serving sur http://${HOST}:${PORT} (modèle '${SERVED_MODEL_NAME}', TP=${TP})"
 
 exec "$VENV/bin/python" -m sglang.launch_server \
   --model-path "${MODEL_PATH}" \

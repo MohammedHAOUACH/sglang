@@ -1,32 +1,38 @@
+# ============================================================================
 # SGLang — Qwen3.8-27B-INT8-W8A16-MTP (serveur d'inférence, Docker)
 #
 # Équivalent Docker de start.sh : mêmes arguments launch_server, mêmes
 # réglages réseau/NCCL (2× RTX 3090 sans NVLink), port 1234.
 #
+# POUR UNE AUTRE MACHINE :
+#   1. cp .env.example .env
+#   2. Éditer .env : MODEL_ROOT (chemin du cache Hugging Face local du modèle)
+#   3. docker compose up -d
+#
 # Image officielle SGLang (Docker Hub) : lmsysorg/sglang
 #   - "latest"          = dernier stable, CUDA 13, outils de build inclus
-#     (nécessaire : la compilation JIT des kernels GPTQ-Marlin au 1er boot,
-#      comme le ninja du .venv dans start.sh).
-#   - "latest-runtime"  = plus léger (~40 %) mais SANS outils de build → à
-#     éviter ici (pas de compilation JIT possible).
-#   - "latest-cu129"    = variante CUDA 12.9 (si jamais driver hôte < 580).
+#     (nécessaire : compilation JIT des kernels GPTQ-Marlin au 1er boot)
+#   - "latest-runtime"  = plus léger (~40 %) mais SANS outils de build
+#   - "latest-cu129"    = variante CUDA 12.9 (driver hôte < 580)
 #
-# Lancement :  docker compose up -d
-# Arrêt :      docker compose down
-# Logs :       docker compose logs -f sglang
-#
-# Surcharges possibles (défauts = valeurs de start.sh), via .env ou
-# variables d'environnement :
-#   PORT, HOST, TP, CONTEXT_LENGTH, MEM_FRACTION, MAX_CONCURRENT_REQUESTS,
-#   ATTN_BACKEND, SERVED_MODEL_NAME, MODEL_ROOT, MODEL_SNAPSHOT, MAMBA_CACHE_SIZE
+# Variables (défauts entre parenthèses) — voir .env.example :
+#   PORT (1234), HOST (0.0.0.0), TP (2), GPU_COUNT (2), CONTEXT_LENGTH
+#   (262144), MEM_FRACTION (0.95), MAX_CONCURRENT_REQUESTS (1),
+#   ATTN_BACKEND (flashinfer), SERVED_MODEL_NAME (qwen3.8-27b-int8-w8a16),
+#   MODEL_ROOT (OBLIGATOIRE), MODEL_SNAPSHOT (7c12373712d1363e2b76655cb3332c9c124627d7),
+#   MAMBA_CACHE_SIZE (4), SGLANG_IMAGE (lmsysorg/sglang:latest)
+# ============================================================================
 
 name: sglang-qwen3
 
 services:
   sglang:
-    image: lmsysorg/sglang:latest
+    # Tag d'image surchargeable (mise à jour SGLang = changer ici ou dans .env)
+    image: "${SGLANG_IMAGE:-lmsysorg/sglang:latest}"
     container_name: sglang-qwen3
     restart: unless-stopped
+    # tini comme PID 1 : gestion propre des signaux / récolte des zombies
+    init: true
 
     # Recommandé par la doc SGLang pour le TP multi-GPU (KV cache / NCCL).
     ipc: host
@@ -41,23 +47,23 @@ services:
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       TOKENIZERS_PARALLELISM: "false"
 
-    # Le modèle est déjà téléchargé sur l'hôte → montage en lecture seule.
-    # On monte le DOSSIER PARENT (models--lued--...) et non le snapshot :
-    # les fichiers du snapshot sont des liens symboliques relatifs vers
-    # ../../blobs/... qui doivent rester résolus dans le conteneur.
+    # Modèle local monté en lecture seule. On monte le DOSSIER PARENT
+    # (models--lued--...) et non le snapshot : les fichiers du snapshot sont
+    # des liens symboliques relatifs vers ../../blobs/... qui doivent rester
+    # résolus dans le conteneur.
     volumes:
-      - "${MODEL_ROOT:-/home/yo/Desktop/code/llm/vllm/models/models--lued--Qwen3.8-27B-INT8-W8A16-MTP}:/models:ro"
+      - "${MODEL_ROOT:?MODEL_ROOT doit être défini — copier .env.example vers .env et adapter le chemin du modèle}:/models:ro"
 
     ports:
       - "${PORT:-1234}:${PORT:-1234}"
 
-    # 2 GPU exposés au conteneur (TP = 2).
+    # GPU exposés au conteneur (GPU_COUNT doit valoir TP).
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 2
+              count: "${GPU_COUNT:-2}"
               capabilities: [gpu]
 
     # ====== Équivalent de start.sh (python -m sglang.launch_server) ======

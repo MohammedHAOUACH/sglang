@@ -63,12 +63,16 @@ pip install -r requirements.txt
 
 ---
 
-## Lancement / arrêt
+## Lancement / arrêt (mode natif)
 
 ```bash
 ./start.sh      # lance le serveur sur http://0.0.0.0:1234
 ./stop.sh       # arrêt propre (SIGTERM puis SIGKILL)
 ```
+
+`start.sh` est autonome : si `.venv/` est absent, il le crée depuis
+`requirements.txt` (une seule fois), et il auto-détecte le snapshot du modèle
+dans `../vllm/models/...` (surchargeable via `MODEL_PATH`).
 
 Le premier démarrage compile les kernels et capture les CUDA graphs
 (~5 min à froid, ~30 s ensuite grâce aux caches Triton/JIT). Les logs vont dans
@@ -85,17 +89,24 @@ curl -s http://127.0.0.1:1234/v1/models     # -> max_model_len: 262144
 
 ## Déploiement Docker (docker compose)
 
-Alternative au venv : le même serveur, avec les **mêmes arguments** que
-`start.sh`, dans l'image officielle **`lmsysorg/sglang:latest`** (Docker Hub,
-dernier stable).
+Le même serveur que `start.sh` (mêmes arguments), dans l'image officielle
+**`lmsysorg/sglang:latest`** (Docker Hub, dernier stable).
+
+**Démarrage rapide (nouvelle machine) :**
 
 ```bash
-docker compose up -d          # lance le serveur sur http://0.0.0.0:1234
-docker compose logs -f sglang # suit les logs
-docker compose down           # arrêt propre
-curl -s http://127.0.0.1:1234/health   # -> 200
+cp .env.example .env                 # 1. créer sa config
+# 2. éditer .env : MODEL_ROOT = chemin du cache HF local du modèle
+nano .env
+
+docker compose up -d                 # 3. lancer sur http://0.0.0.0:1234
+docker compose logs -f sglang        # suivre les logs
+docker compose down                  # arrêt propre
+curl -s http://127.0.0.1:1234/health # -> 200
 ```
 
+- `MODEL_ROOT` est **obligatoire** : `docker compose` refuse de démarrer sans
+  (message d'erreur explicite).
 - Le conteneur réserve **2 GPU** (TP=2) et expose le port `1234` ; il reprend
   les mêmes réglages NCCL que `start.sh` (`NCCL_P2P_DISABLE=1`, etc.).
 - Le modèle est monté en **lecture seule** depuis le cache HF local (aucun
@@ -120,15 +131,17 @@ cp .env.example .env
 
 | Variable | Défaut | Rôle |
 |---|---|---|
+| `SGLANG_IMAGE` | `lmsysorg/sglang:latest` | Tag d'image (mise à jour SGLang = changer ici) |
 | `PORT` | `1234` | Port HTTP exposé |
 | `HOST` | `0.0.0.0` | Adresse d'écoute |
 | `TP` | `2` | Taille du tensor parallel |
+| `GPU_COUNT` | `2` | GPU exposés au conteneur (doit valoir `TP`) |
 | `CONTEXT_LENGTH` | `262144` | Contexte natif max du modèle |
 | `MEM_FRACTION` | `0.95` | Fraction de VRAM réservée |
 | `MAX_CONCURRENT_REQUESTS` | `1` | Requêtes concurrentes |
 | `ATTN_BACKEND` | `flashinfer` | `triton` en repli si MTP+flashinfer plante au boot |
 | `SERVED_MODEL_NAME` | `qwen3.8-27b-int8-w8a16` | Nom exposé par l'API |
-| `MODEL_ROOT` | chemin du cache HF | Dossier parent du modèle (monté dans `/models`) |
+| `MODEL_ROOT` | **obligatoire** | Dossier parent du modèle dans le cache HF (monté dans `/models`) |
 | `MODEL_SNAPSHOT` | hash du snapshot | Sous-dossier pointé par `--model-path` |
 | `MAMBA_CACHE_SIZE` | `4` | Slots du cache GDN (concurrence × 4) |
 
@@ -150,6 +163,8 @@ cp .env.example .env
 | `MEM_FRACTION` | `0.95` | Fraction de VRAM réservée (le plus haut sûr sur 48 Go) |
 | `MAX_CONCURRENT_REQUESTS` | `1` | Requêtes concurrentes (1 = max de contexte par requête) |
 | `ATTN_BACKEND` | `flashinfer` | `triton` en repli si MTP+flashinfer plante au boot |
+| `MODEL_PATH` | auto-détecté | Chemin direct vers le snapshot du modèle (si non auto-détecté) |
+| `MODEL_REPO_DIR` | `../vllm/models/models--lued--...` | Dossier parent du modèle dans le cache HF |
 
 Exemple — 2 requêtes concurrentes (moins de contexte par requête) :
 
@@ -193,6 +208,9 @@ python3 bench.py          # débit net (méthode delta 2 appels)
 
 > Les deux scripts n'utilisent que la stdlib → n'importe quel `python3` suffit
 > (pas besoin du venv).
+>
+> Surcharges possibles : `SGLANG_BASE_URL` (défaut `http://127.0.0.1:1234/v1/chat/completions`)
+> et `SGLANG_MODEL` (défaut `qwen3.8-27b-int8-w8a16`).
 
 ### Résultats mesurés (2× RTX 3090, MTP 3/1/4 — déploiement Docker `compose.yaml`)
 
@@ -228,6 +246,7 @@ Débit net (méthode delta 2 appels, `bench.py`) :
 | `FileNotFoundError: 'ninja'` au boot | `.venv/bin` absent du PATH (corrigé dans `start.sh`) |
 | `pidfd_getfd: Operation not permitted` | transport multimodal CUDA IPC bloqué → `--mm-feature-transport cpu` (déjà en place) |
 | `Custom allreduce failed` (warning) | normal sans NVLink sur 3090 → `--disable-custom-all-reduce` (déjà en place) |
+| `MODEL_ROOT` non défini (Docker) | `docker compose` refuse de démarrer → copier `.env.example` en `.env` et renseigner `MODEL_ROOT` |
 | `ValueError: Unrecognized model in /models` (Docker) | montage du snapshot seul → liens `../../blobs` cassés ; monter le dossier **parent** (`MODEL_ROOT`) |
 | Boot Docker ~5 min à froid | compilation JIT Triton dans le conteneur (pas de cache `/root/.triton` persisté entre `down`/`up`) |
 | Port `1234` déjà utilisé | serveur venv encore actif → `./stop.sh`, ou changer `PORT` dans `.env` |
@@ -244,7 +263,7 @@ llm/sglang/
 ├── .env             # variables locales docker compose (généré, ignoré par git)
 ├── .env.example     # modèle des variables docker compose
 ├── requirements.txt # dépendances Python figées du mode natif (venv)
-├── start.sh         # lance le serveur SGLang natif (port 1234, requiert le venv)
+├── start.sh         # lance le serveur SGLang natif (venv auto-créé, modèle auto-détecté)
 ├── stop.sh          # arrête le serveur natif
 ├── bench.py         # benchmark (débit net)
 ├── bench_stream.py  # benchmark streaming (TTFT + débit précis)

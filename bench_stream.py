@@ -3,11 +3,15 @@
 
 Token count via usage.completion_tokens (stream_options.include_usage=true),
 donc indépendant du nombre de caractères du flux.
-"""
-import json, time, urllib.request, statistics
 
-BASE = "http://127.0.0.1:1234/v1/chat/completions"
-MODEL = "qwen3.8-27b-int8-w8a16"
+Configuration par variables d'environnement (défauts entre parenthèses) :
+  SGLANG_BASE_URL (http://127.0.0.1:1234/v1/chat/completions)
+  SGLANG_MODEL    (qwen3.8-27b-int8-w8a16)
+"""
+import json, os, time, urllib.request, statistics
+
+BASE = os.environ.get("SGLANG_BASE_URL", "http://127.0.0.1:1234/v1/chat/completions")
+MODEL = os.environ.get("SGLANG_MODEL", "qwen3.8-27b-int8-w8a16")
 
 
 def stream_call(prompt, max_tokens, thinking=False, temperature=0.0):
