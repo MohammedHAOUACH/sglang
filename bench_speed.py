@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Quick streaming speed test for the local sglang server."""
+"""Test rapide de vitesse streaming (TTFT + débit décodage, 1 requête).
+
+Configuration par variables d'environnement (défauts entre parenthèses) :
+  SGLANG_BASE_URL (http://127.0.0.1:1234/v1/chat/completions)
+  SGLANG_MODEL    (qwen3.8-27b-int8-w8a16)
+"""
 import json
+import os
 import time
 import urllib.request
 
-BASE = "http://127.0.0.1:1234/v1"
-MODEL = "qwen3.8-27b-int8-w8a16"
+BASE = os.environ.get("SGLANG_BASE_URL", "http://127.0.0.1:1234/v1/chat/completions")
+MODEL = os.environ.get("SGLANG_MODEL", "qwen3.8-27b-int8-w8a16")
 
 
 def stream(prompt, max_tokens):
@@ -19,7 +25,7 @@ def stream(prompt, max_tokens):
     }).encode()
 
     req = urllib.request.Request(
-        f"{BASE}/chat/completions",
+        BASE,
         data=body,
         headers={"Content-Type": "application/json"},
     )

@@ -283,8 +283,8 @@ surchargeable via `DRAFT_MODEL_PATH` / `DRAFT_REPO_DIR`) et affiche un
 
 | Mode | Pool KV | Contexte max réel | Débit (code) |
 |---|---|---|---|
-| **EAGLE** (défaut, priorité contexte) | ~226 K | ~220 K tokens | ~141 tok/s |
-| **DFLASH2** (priorité vitesse) | ~96 K | ~90 K tokens | ~133-141 tok/s |
+| **EAGLE** (défaut, priorité contexte) | ~226 K | ~220 K tokens | ~65 tok/s soutenu (mesuré) |
+| **DFLASH2** (priorité vitesse) | ~96 K | ~90 K tokens | non mesuré sur 3090 — à valider avec `bench_stream.py` (la cible Blackwell du cookbook est ~141 tok/s) |
 - **TP=2** : le worker draft est compatible TP, mais seul le TP=1 a été
   mesuré par le cookbook.
 
@@ -318,14 +318,16 @@ curl -s http://127.0.0.1:1234/v1/chat/completions \
 ## Benchmark
 
 ```bash
-python3 bench_stream.py   # débit de décodage soutenu + TTFT (précis)
-python3 bench.py          # débit net (méthode delta 2 appels)
+python3 bench_stream.py       # débit de décodage soutenu + TTFT (précis)
+python3 bench.py              # débit net (méthode delta 2 appels)
+python3 bench_speed.py        # test rapide 1 requête (TTFT + décodage 256 tok)
+python3 bench_concurrent.py   # charge concurrente 1/2/4/8 requêtes (débit agrégé)
 ```
 
-> Les deux scripts n'utilisent que la stdlib → n'importe quel `python3` suffit
+> Les quatre scripts n'utilisent que la stdlib → n'importe quel `python3` suffit
 > (pas besoin du venv).
 >
-> Surcharges possibles : `SGLANG_BASE_URL` (défaut `http://127.0.0.1:1234/v1/chat/completions`)
+> Surcharges possibles (les quatre scripts) : `SGLANG_BASE_URL` (défaut `http://127.0.0.1:1234/v1/chat/completions`)
 > et `SGLANG_MODEL` (défaut `qwen3.8-27b-int8-w8a16`).
 
 ### Résultats mesurés (2× RTX 3090, MTP 3/1/4 — déploiement Docker `compose.yaml`)
@@ -383,8 +385,10 @@ llm/sglang/
 ├── requirements.txt # dépendances Python figées du mode natif (venv)
 ├── start.sh         # lance le serveur SGLang natif (venv auto-créé, modèle auto-détecté)
 ├── stop.sh          # arrête le serveur natif
-├── bench.py         # benchmark (débit net)
-├── bench_stream.py  # benchmark streaming (TTFT + débit précis)
+├── bench.py         # benchmark (débit net, méthode delta)
+├── bench_stream.py  # benchmark streaming (TTFT + débit soutenu, précis)
+├── bench_speed.py   # test rapide 1 requête (TTFT + décodage 256 tok)
+├── bench_concurrent.py  # charge concurrente 1/2/4/8 requêtes (débit agrégé)
 ├── sglang.log       # logs du serveur (généré, ignoré par git)
 └── README.md
 ```
