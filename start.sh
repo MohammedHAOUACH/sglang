@@ -8,12 +8,16 @@
 # Surcharges possibles (défauts entre parenthèses) :
 #   MODEL_PATH          chemin direct vers le snapshot (sinon auto-détection)
 #   MODEL_REPO_DIR      dossier parent du modèle HF (../vllm/models/models--lued--Qwen3.8-27B-INT8-W8A16-MTP)
-#   PORT (1234), HOST (0.0.0.0), TP (2), CONTEXT_LENGTH (262144),
-#   MEM_FRACTION (0.95), MAX_CONCURRENT_REQUESTS (1),
-#   ATTN_BACKEND (flashinfer), SERVED_MODEL_NAME (qwen3.8-27b-int8-w8a16),
+#   SGLANG_PORT (1234), SGLANG_HOST (0.0.0.0), SGLANG_TP (2),
+#   SGLANG_CONTEXT_LENGTH (220000), SGLANG_MEM_FRACTION (0.95),
+#   SGLANG_MAX_CONCURRENT_REQUESTS (2), SGLANG_ATTN_BACKEND (flashinfer),
+#   SGLANG_SERVED_MODEL_NAME (qwen3.8-27b-int8-w8a16),
 #   SPEC_ALGORITHM (EAGLE ; DFLASH = draft externe DFlash2, exige SGLang de main),
 #   DRAFT_MODEL_PATH / DRAFT_REPO_DIR (draft auto-détecté dans
 #   ../vllm/models/models--z-lab--Qwen3.8-27B-DFlash2)
+#
+# ⚠️ Préfixe SGLANG_ sur toutes les variables de config : les exports shell
+# homonymes (PORT, TP, ...) écraseraient sinon les défauts ci-dessous.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
@@ -50,18 +54,18 @@ if [[ ! -x "${VENV}/bin/python" ]]; then
 fi
 
 # --- Config (surchargable par variables d'environnement) -------------------
-SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-qwen3.8-27b-int8-w8a16}"
-TP="${TP:-2}"
-CONTEXT_LENGTH="${CONTEXT_LENGTH:-262144}"
-# 1 requête concurrente = max de contexte par requête (pool GDN réduit →
-# plus de VRAM pour le KV cache des couches full-attention).
-MAX_CONCURRENT_REQUESTS="${MAX_CONCURRENT_REQUESTS:-1}"
-# 0.95 = le plus haut sûr sur 2×24 Go (marge pour CUDA graphs/activations).
-MEM_FRACTION="${MEM_FRACTION:-0.95}"
-PORT="${PORT:-1234}"
-HOST="${HOST:-0.0.0.0}"
+# Préfixe SGLANG_ : immunise contre les exports shell homonymes.
+SGLANG_SERVED_MODEL_NAME="${SGLANG_SERVED_MODEL_NAME:-qwen3.8-27b-int8-w8a16}"
+SGLANG_TP="${SGLANG_TP:-2}"
+SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-220000}"
+# 2 requêtes concurrentes = compromis contexte vs charge.
+SGLANG_MAX_CONCURRENT_REQUESTS="${SGLANG_MAX_CONCURRENT_REQUESTS:-2}"
+# 0.95 = le plus haut sûr sur 2×24 Go en EAGLE (marge pour CUDA graphs).
+SGLANG_MEM_FRACTION="${SGLANG_MEM_FRACTION:-0.95}"
+SGLANG_PORT="${SGLANG_PORT:-1234}"
+SGLANG_HOST="${SGLANG_HOST:-0.0.0.0}"
 # flashinfer = rapide ; triton = repli si MTP+flashinfer plante au boot
-ATTN_BACKEND="${ATTN_BACKEND:-flashinfer}"
+SGLANG_ATTN_BACKEND="${SGLANG_ATTN_BACKEND:-flashinfer}"
 
 # --- Décodage spéculatif ----------------------------------------------------
 # EAGLE = MTP in-checkpoint (défaut) ; DFLASH = draft externe DFlash2.
@@ -105,7 +109,7 @@ fi
 # possible sous charge de gros prompts partagés.
 MAMBA_SLOTS_PER_REQ=4
 MAMBA_RADIX_HEADROOM=4
-MAMBA_CACHE_SIZE=$((MAX_CONCURRENT_REQUESTS * MAMBA_SLOTS_PER_REQ + MAMBA_RADIX_HEADROOM))
+MAMBA_CACHE_SIZE=$((SGLANG_MAX_CONCURRENT_REQUESTS * MAMBA_SLOTS_PER_REQ + MAMBA_RADIX_HEADROOM))
 
 # 2x RTX 3090 sans NVLink (PCIe) : stabilise NCCL comme le setup vLLM.
 export NCCL_P2P_DISABLE=1
@@ -115,18 +119,18 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
 
 echo "Modèle : ${MODEL_PATH}"
-echo "Serving sur http://${HOST}:${PORT} (modèle '${SERVED_MODEL_NAME}', TP=${TP})"
+echo "Serving sur http://${SGLANG_HOST}:${SGLANG_PORT} (modèle '${SGLANG_SERVED_MODEL_NAME}', TP=${SGLANG_TP})"
 
 exec "$VENV/bin/python" -m sglang.launch_server \
   --model-path "${MODEL_PATH}" \
-  --served-model-name "${SERVED_MODEL_NAME}" \
-  --tp-size "${TP}" \
+  --served-model-name "${SGLANG_SERVED_MODEL_NAME}" \
+  --tp-size "${SGLANG_TP}" \
   --trust-remote-code \
   --dtype bfloat16 \
   --disable-custom-all-reduce \
   --mm-feature-transport cpu \
-  --mem-fraction-static "${MEM_FRACTION}" \
-  --attention-backend "${ATTN_BACKEND}" \
+  --mem-fraction-static "${SGLANG_MEM_FRACTION}" \
+  --attention-backend "${SGLANG_ATTN_BACKEND}" \
   --chunked-prefill-size 8192 \
   --disable-prefill-cuda-graph \
   --kv-cache-dtype fp8_e4m3 \
@@ -134,11 +138,11 @@ exec "$VENV/bin/python" -m sglang.launch_server \
   --mamba-full-memory-ratio 4.21 \
   --mamba-radix-cache-strategy extra_buffer_lazy \
   --max-mamba-cache-size "${MAMBA_CACHE_SIZE}" \
-  --max-running-requests "${MAX_CONCURRENT_REQUESTS}" \
-  --context-length "${CONTEXT_LENGTH}" \
+  --max-running-requests "${SGLANG_MAX_CONCURRENT_REQUESTS}" \
+  --context-length "${SGLANG_CONTEXT_LENGTH}" \
   "${SPEC_ARGS[@]}" \
   --reasoning-parser qwen3 \
   --tool-call-parser qwen3_coder \
   --sampling-defaults model \
-  --host "${HOST}" \
-  --port "${PORT}"
+  --host "${SGLANG_HOST}" \
+  --port "${SGLANG_PORT}"

@@ -6,7 +6,7 @@
 #
 # POUR UNE AUTRE MACHINE :
 #   1. cp .env.example .env
-#   2. Éditer .env : MODEL_ROOT (chemin du cache Hugging Face local du modèle)
+#   2. Éditer .env : SGLANG_MODEL_ROOT (chemin du cache Hugging Face local du modèle)
 #   3. docker compose up -d
 #
 # Image officielle SGLang (Docker Hub) : lmsysorg/sglang
@@ -20,14 +20,20 @@
 #   - "latest-cu129"    = variante CUDA 12.9 (driver hôte < 580)
 #
 # Variables (défauts entre parenthèses) — voir .env.example :
-#   PORT (1234), HOST (0.0.0.0), TP (2), GPU_COUNT (2), CONTEXT_LENGTH
-#   (262144), MEM_FRACTION (0.95), MAX_CONCURRENT_REQUESTS (1),
-#   ATTN_BACKEND (flashinfer), SERVED_MODEL_NAME (qwen3.8-27b-int8-w8a16),
-#   MODEL_ROOT (OBLIGATOIRE — dossier parent du cache HF local, celui qui
-#     contient models--lued--... et models--z-lab--...), MODEL_SNAPSHOT
+#   SGLANG_PORT (1234), SGLANG_HOST (0.0.0.0), SGLANG_TP (2),
+#   SGLANG_GPU_COUNT (2), SGLANG_CONTEXT_LENGTH (220000), SGLANG_MEM_FRACTION
+#   (0.95), SGLANG_MAX_CONCURRENT_REQUESTS (2), SGLANG_ATTN_BACKEND
+#   (flashinfer), SGLANG_SERVED_MODEL_NAME (qwen3.8-27b-int8-w8a16),
+#   SGLANG_MODEL_ROOT (OBLIGATOIRE — dossier parent du cache HF local, celui
+#     qui contient models--lued--... et models--z-lab--...), MODEL_SNAPSHOT
 #     (7c12373712d1363e2b76655cb3332c9c124627d7), MODEL_REPO_DIR
 #     (models--lued--Qwen3.8-27B-INT8-W8A16-MTP),
-#   SGLANG_MAMBA_CACHE_SIZE (8), SGLANG_IMAGE (lmsysorg/sglang:latest)
+#   SGLANG_MAMBA_CACHE_SIZE (8), SGLANG_DOCKER_IMAGE (lmsysorg/sglang:latest)
+#
+# ⚠️ TOUTES les variables sont préfixées SGLANG_ : le shell exporte un jeu de
+# variables homonymes (MODEL_ROOT, PORT, TP, ...) qui, sinon, écraserait le
+# .env à chaque docker compose (le shell prime sur .env). Le préfixe rend le
+# projet immunisé — voir le commentaire sur SGLANG_MAMBA_CACHE_SIZE.
 #
 # Décodage spéculatif (voir README → « DFLASH2 (optionnel) ») :
 #   SPEC_ALGORITHM (EAGLE)      EAGLE = MTP in-checkpoint (défaut) ;
@@ -47,8 +53,8 @@ name: sglang-qwen3
 services:
   sglang:
     # Tag d'image surchargeable (mise à jour SGLang = changer ici ou dans .env).
-    # DFLASH2 ⇒ SGLANG_IMAGE=lmsysorg/sglang:dev (build de main).
-    image: "${SGLANG_IMAGE:-lmsysorg/sglang:latest}"
+    # DFLASH2 ⇒ SGLANG_DOCKER_IMAGE=lmsysorg/sglang:dev (build de main).
+    image: "${SGLANG_DOCKER_IMAGE:-lmsysorg/sglang:latest}"
     container_name: sglang-qwen3
     restart: unless-stopped
     # tini comme PID 1 : gestion propre des signaux / récolte des zombies
@@ -73,10 +79,10 @@ services:
     # snapshots sont des liens symboliques relatifs vers ../../blobs/... qui
     # doivent rester résolus dans le conteneur. Aucun téléchargement au boot.
     volumes:
-      - "${MODEL_ROOT:?MODEL_ROOT doit être défini — copier .env.example vers .env et pointer vers le dossier parent du cache HF (celui qui contient models--lued--... et models--z-lab--...)}:/models:ro"
+      - "${SGLANG_MODEL_ROOT:?SGLANG_MODEL_ROOT doit être défini — copier .env.example vers .env et pointer vers le dossier parent du cache HF (celui qui contient models--lued--... et models--z-lab--...)}:/models:ro"
 
     ports:
-      - "${PORT:-1234}:${PORT:-1234}"
+      - "${SGLANG_PORT:-1234}:${SGLANG_PORT:-1234}"
 
     # GPU exposés au conteneur (GPU_COUNT doit valoir TP).
     deploy:
@@ -84,7 +90,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: "${GPU_COUNT:-2}"
+              count: "${SGLANG_GPU_COUNT:-2}"
               capabilities: [gpu]
 
     # ====== Équivalent de start.sh (python -m sglang.launch_server) ======
@@ -99,21 +105,21 @@ services:
         set -euo pipefail
         EXTRA_SPEC_ARGS=""
         if [ "${SPEC_ALGORITHM:-EAGLE}" = "DFLASH" ]; then
-          # Draft local (monté depuis MODEL_ROOT) : snapshot z-lab DFlash2.
+          # Draft local (monté depuis SGLANG_MODEL_ROOT) : snapshot z-lab DFlash2.
           EXTRA_SPEC_ARGS="--speculative-draft-model-path /models/${DRAFT_REPO_DIR:-models--z-lab--Qwen3.8-27B-DFlash2}/snapshots/${DRAFT_SNAPSHOT:-50307d4c4cde6860d4eee73e2547cd786fe8e8a4} --speculative-num-draft-tokens ${SPEC_NUM_DRAFT_TOKENS:-8}"
         else
           EXTRA_SPEC_ARGS="--speculative-num-steps ${SPEC_NUM_STEPS:-3} --speculative-eagle-topk ${SPEC_EAGLE_TOPK:-1} --speculative-num-draft-tokens ${SPEC_NUM_DRAFT_TOKENS:-4}"
         fi
         exec python3 -m sglang.launch_server \
           --model-path "/models/${MODEL_REPO_DIR:-models--lued--Qwen3.8-27B-INT8-W8A16-MTP}/snapshots/${MODEL_SNAPSHOT:-7c12373712d1363e2b76655cb3332c9c124627d7}" \
-          --served-model-name "${SERVED_MODEL_NAME:-qwen3.8-27b-int8-w8a16}" \
-          --tp-size "${TP:-2}" \
+          --served-model-name "${SGLANG_SERVED_MODEL_NAME:-qwen3.8-27b-int8-w8a16}" \
+          --tp-size "${SGLANG_TP:-2}" \
           --trust-remote-code \
           --dtype bfloat16 \
           --disable-custom-all-reduce \
           --mm-feature-transport cpu \
-          --mem-fraction-static "${MEM_FRACTION:-0.95}" \
-          --attention-backend "${ATTN_BACKEND:-flashinfer}" \
+          --mem-fraction-static "${SGLANG_MEM_FRACTION:-0.95}" \
+          --attention-backend "${SGLANG_ATTN_BACKEND:-flashinfer}" \
           --chunked-prefill-size 8192 \
           --disable-prefill-cuda-graph \
           --kv-cache-dtype fp8_e4m3 \
@@ -121,15 +127,15 @@ services:
           --mamba-full-memory-ratio 4.21 \
           --mamba-radix-cache-strategy extra_buffer_lazy \
           --max-mamba-cache-size "${SGLANG_MAMBA_CACHE_SIZE:-8}" \
-          --max-running-requests "${MAX_CONCURRENT_REQUESTS:-1}" \
-          --context-length "${CONTEXT_LENGTH:-262144}" \
+          --max-running-requests "${SGLANG_MAX_CONCURRENT_REQUESTS:-2}" \
+          --context-length "${SGLANG_CONTEXT_LENGTH:-220000}" \
           --speculative-algorithm "${SPEC_ALGORITHM:-EAGLE}" \
           $${EXTRA_SPEC_ARGS} \
           --reasoning-parser qwen3 \
           --tool-call-parser qwen3_coder \
           --sampling-defaults model \
-          --host "${HOST:-0.0.0.0}" \
-          --port "${PORT:-1234}"
+          --host "${SGLANG_HOST:-0.0.0.0}" \
+          --port "${SGLANG_PORT:-1234}"
 
     # 1er boot = compilation JIT + capture CUDA graphs (~5 min à froid).
     # NB : pendant un prefill très long (gros contexte, requête unique), la

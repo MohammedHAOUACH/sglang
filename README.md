@@ -23,7 +23,7 @@ adaptée ici au hardware **2× RTX 3090 (Ampere, 48 Go)** au lieu du DGX Spark (
 | GPU | 2 × RTX 3090 (compute capability 8.6, **pas de NVFP4/FP8 natif**) |
 | VRAM | 24 Go × 2 = 48 Go |
 | Parallélisme | Tensor Parallel = 2 (`--tp-size 2`) |
-| Contexte servi | 262 144 tokens (natif) — pool KV ≈ **245 000 tokens** |
+| Contexte servi | **220 000 tokens** annoncés par l'API (= max réel : pool KV ~226 K, marge sortie incluse) |
 | KV cache | FP8 (`fp8_e4m3`) |
 | Décodage spéculatif | MTP (EAGLE 3 steps / topk 1 / 4 draft tokens) — option DFLASH2 disponible (voir plus bas) |
 | Thinking | ON par défaut (désactivable par requête) |
@@ -96,7 +96,7 @@ Le même serveur que `start.sh` (mêmes arguments), dans l'image officielle
 
 ```bash
 cp .env.example .env                 # 1. créer sa config
-# 2. éditer .env : MODEL_ROOT = chemin du cache HF local du modèle
+# 2. éditer .env : SGLANG_MODEL_ROOT = chemin du cache HF local du modèle
 nano .env
 
 docker compose up -d                 # 3. lancer sur http://0.0.0.0:1234
@@ -105,13 +105,13 @@ docker compose down                  # arrêt propre
 curl -s http://127.0.0.1:1234/health # -> 200
 ```
 
-- `MODEL_ROOT` est **obligatoire** : `docker compose` refuse de démarrer sans
-  (message d'erreur explicite).
+- `SGLANG_MODEL_ROOT` est **obligatoire** : `docker compose` refuse de démarrer
+  sans (message d'erreur explicite).
 - Le conteneur réserve **2 GPU** (TP=2) et expose le port `1234` ; il reprend
   les mêmes réglages NCCL que `start.sh` (`NCCL_P2P_DISABLE=1`, etc.).
 - Les modèles sont montés en **lecture seule** depuis le cache HF local
-  (aucun re-téléchargement). `MODEL_ROOT` pointe sur le **dossier parent du
-  cache HF**, celui qui contient `models--lued--...` (cible) **et**
+  (aucun re-téléchargement). `SGLANG_MODEL_ROOT` pointe sur le **dossier
+  parent du cache HF**, celui qui contient `models--lued--...` (cible) **et**
   `models--z-lab--...` (draft DFLASH2) ; on monte le parent et non le
   snapshot : les fichiers des snapshots sont des liens symboliques relatifs
   vers `../../blobs/...` qui doivent rester résolus dans le conteneur.
@@ -134,28 +134,38 @@ cp .env.example .env
 
 | Variable | Défaut | Rôle |
 |---|---|---|
-| `SGLANG_IMAGE` | `lmsysorg/sglang:latest` | Tag d'image (mise à jour SGLang = changer ici) |
-| `PORT` | `1234` | Port HTTP exposé |
-| `HOST` | `0.0.0.0` | Adresse d'écoute |
-| `TP` | `2` | Taille du tensor parallel |
-| `GPU_COUNT` | `2` | GPU exposés au conteneur (doit valoir `TP`) |
-| `CONTEXT_LENGTH` | `262144` | Contexte natif max du modèle |
-| `MEM_FRACTION` | `0.85` | Fraction de VRAM réservée — 0.95 OK en EAGLE ; **0.85 requis avec DFLASH2** (draft 3,6 Go : 0.95 = OOM immédiat, 0.90 = OOM quand les kernels Triton JIT se chargent en service, ~1 Go consommé) |
-| `MAX_CONCURRENT_REQUESTS` | `1` | Requêtes concurrentes |
-| `ATTN_BACKEND` | `flashinfer` | `triton` en repli si MTP+flashinfer plante au boot |
-| `SERVED_MODEL_NAME` | `qwen3.8-27b-int8-w8a16` | Nom exposé par l'API |
-| `MODEL_ROOT` | **obligatoire** | Dossier parent du **cache HF** (celui qui contient `models--lued--...` et `models--z-lab--...`) — monté dans `/models` |
-| `MODEL_REPO_DIR` | `models--lued--Qwen3.8-27B-INT8-W8A16-MTP` | Sous-dossier du modèle cible dans `MODEL_ROOT` |
+| `SGLANG_DOCKER_IMAGE` | `lmsysorg/sglang:latest` | Tag d'image (mise à jour SGLang = changer ici ; `dev` pour DFLASH2) |
+| `SGLANG_PORT` | `1234` | Port HTTP exposé |
+| `SGLANG_HOST` | `0.0.0.0` | Adresse d'écoute |
+| `SGLANG_TP` | `2` | Taille du tensor parallel |
+| `SGLANG_GPU_COUNT` | `2` | GPU exposés au conteneur (doit valoir `SGLANG_TP`) |
+| `SGLANG_CONTEXT_LENGTH` | `220000` | Contexte annoncé par l'API = max réellement utilisable (pool KV ~226 K à EAGLE/0.95 ; ~96 K en DFLASH2) — 262144 serait rejeté en 400 au-delà du pool |
+| `SGLANG_MEM_FRACTION` | `0.95` | Fraction de VRAM réservée — 0.95 OK en EAGLE (pool ~226 K) ; **0.88 avec DFLASH2** (draft 3,6 Go) : 0.95 = OOM immédiat, 0.90 = OOM après chargements JIT en service, 0.88 = pool **96 765 tokens** + marge ~0,6-1 Go/GPU sous charge |
+| `SGLANG_MAX_CONCURRENT_REQUESTS` | `2` | Requêtes concurrentes (2 = compromis contexte vs charge) |
+| `SGLANG_ATTN_BACKEND` | `flashinfer` | `triton` en repli si MTP+flashinfer plante au boot |
+| `SGLANG_SERVED_MODEL_NAME` | `qwen3.8-27b-int8-w8a16` | Nom exposé par l'API |
+| `SGLANG_MODEL_ROOT` | **obligatoire** | Dossier parent du **cache HF** (celui qui contient `models--lued--...` et `models--z-lab--...`) — monté dans `/models` |
+| `MODEL_REPO_DIR` | `models--lued--Qwen3.8-27B-INT8-W8A16-MTP` | Sous-dossier du modèle cible dans `SGLANG_MODEL_ROOT` |
 | `MODEL_SNAPSHOT` | hash du snapshot | Snapshot du modèle cible pointé par `--model-path` |
 | `SGLANG_MAMBA_CACHE_SIZE` | `8` | Slots du cache GDN (concurrence × 4 + 4 de marge radix) — 16 → KV ~188 K (plus sûr), 4 → KV ~245 K (crash possible). Préfixe `SGLANG_` : évite qu'un export shell de `MAMBA_CACHE_SIZE` n'écrase la valeur de `.env` |
 | `SPEC_ALGORITHM` | `EAGLE` | Décodage spéculatif : `EAGLE` (MTP in-checkpoint, défaut) ou `DFLASH` (draft externe DFlash2 — exige une image de main, voir section DFLASH2) |
-| `DRAFT_REPO_DIR` | `models--z-lab--Qwen3.8-27B-DFlash2` | Sous-dossier du draft DFlash2 dans `MODEL_ROOT` — utilisé seulement si `SPEC_ALGORITHM=DFLASH` |
+| `DRAFT_REPO_DIR` | `models--z-lab--Qwen3.8-27B-DFlash2` | Sous-dossier du draft DFlash2 dans `SGLANG_MODEL_ROOT` — utilisé seulement si `SPEC_ALGORITHM=DFLASH` |
 | `DRAFT_SNAPSHOT` | `50307d4c4cde6860d4eee73e2547cd786fe8e8a4` | Snapshot du draft DFlash2 pointé par `--speculative-draft-model-path` |
 | `SPEC_NUM_STEPS` / `SPEC_EAGLE_TOPK` | `3` / `1` | Paramètres EAGLE uniquement (ignorés en DFLASH) |
 | `SPEC_NUM_DRAFT_TOKENS` | `4` (EAGLE) / `8` (DFLASH) | Tokens draftés par pas ; en DFLASH, 8 = block size du draft |
 
+> ⚠️ **Préfixe `SGLANG_` = immunisation** : toutes les variables de config
+> portent ce préfixe parce que votre shell exporte des variables homonymes
+> (`MODEL_ROOT`, `PORT`, `TP`, `MEM_FRACTION`, `CONTEXT_LENGTH`, …) qui
+> **écrasent le `.env`** dans docker compose (le shell prime sur `.env`). Avec
+> le préfixe, le `.env` fait foi. Si ces exports subsistent dans votre profil
+> shell, pensez à les retirer (`unset MODEL_ROOT PORT HOST TP GPU_COUNT
+> CONTEXT_LENGTH MEM_FRACTION MAX_CONCURRENT_REQUESTS ATTN_BACKEND
+> SERVED_MODEL_NAME SGLANG_IMAGE`).
+>
 > ⚠️ Ne pas faire tourner le venv **et** le conteneur en même temps : le port
-> `1234` ne peut pas être partagé (`./stop.sh` ou changer `PORT` dans `.env`).
+> `1234` ne peut pas être partagé (`./stop.sh` ou changer `SGLANG_PORT` dans
+> `.env`).
 
 ---
 
@@ -165,20 +175,20 @@ cp .env.example .env
 
 | Variable | Défaut | Rôle |
 |---|---|---|
-| `PORT` | `1234` | Port d'écoute HTTP |
-| `HOST` | `0.0.0.0` | Adresse d'écoute |
-| `TP` | `2` | Taille du tensor parallel |
-| `CONTEXT_LENGTH` | `262144` | Contexte natif max du modèle |
-| `MEM_FRACTION` | `0.95` | Fraction de VRAM réservée (le plus haut sûr sur 48 Go) |
-| `MAX_CONCURRENT_REQUESTS` | `1` | Requêtes concurrentes (1 = max de contexte par requête) |
-| `ATTN_BACKEND` | `flashinfer` | `triton` en repli si MTP+flashinfer plante au boot |
+| `SGLANG_PORT` | `1234` | Port d'écoute HTTP |
+| `SGLANG_HOST` | `0.0.0.0` | Adresse d'écoute |
+| `SGLANG_TP` | `2` | Taille du tensor parallel |
+| `SGLANG_CONTEXT_LENGTH` | `220000` | Contexte annoncé par l'API = max réellement utilisable (pool KV ~226 K à EAGLE/0.95 ; ~96 K en DFLASH2) — 262144 serait rejeté en 400 au-delà du pool |
+| `SGLANG_MEM_FRACTION` | `0.95` | Fraction de VRAM réservée (le plus haut sûr sur 48 Go en EAGLE) |
+| `SGLANG_MAX_CONCURRENT_REQUESTS` | `2` | Requêtes concurrentes (2 = compromis contexte vs charge) |
+| `SGLANG_ATTN_BACKEND` | `flashinfer` | `triton` en repli si MTP+flashinfer plante au boot |
 | `MODEL_PATH` | auto-détecté | Chemin direct vers le snapshot du modèle (si non auto-détecté) |
 | `MODEL_REPO_DIR` | `../vllm/models/models--lued--...` | Dossier parent du modèle dans le cache HF |
 
 Exemple — 2 requêtes concurrentes (moins de contexte par requête) :
 
 ```bash
-MAX_CONCURRENT_REQUESTS=2 ./start.sh
+SGLANG_MAX_CONCURRENT_REQUESTS=2 ./start.sh
 ```
 
 ---
@@ -204,7 +214,7 @@ DFLASH2 a été ajouté dans les PRs [#35371](https://github.com/sgl-project/sgl
 
 ```bash
 # dans .env
-SGLANG_IMAGE=lmsysorg/sglang:dev
+SGLANG_DOCKER_IMAGE=lmsysorg/sglang:dev
 ```
 
 **Option figée — build local au commit validé par le cookbook** (~1-2 h,
@@ -214,7 +224,7 @@ reproductible) :
 git clone https://github.com/sgl-project/sglang.git && cd sglang
 git checkout 1cf2b8c54d81802abc15dcf23a29b9cc687bc01e   # PR #35496
 docker build -t sglang:dflash2 -f docker/Dockerfile .
-# puis dans .env : SGLANG_IMAGE=sglang:dflash2
+# puis dans .env : SGLANG_DOCKER_IMAGE=sglang:dflash2
 ```
 
 > Si le boot échoue sur l'image `dev` (outils de build manquants pour la
@@ -224,7 +234,7 @@ docker build -t sglang:dflash2 -f docker/Dockerfile .
 
 ```bash
 # dans .env
-SGLANG_IMAGE=lmsysorg/sglang:dev
+SGLANG_DOCKER_IMAGE=lmsysorg/sglang:dev
 SPEC_ALGORITHM=DFLASH
 # Draft local (déjà dans code/vllm/models) — défauts dans compose.yaml :
 # DRAFT_REPO_DIR=models--z-lab--Qwen3.8-27B-DFlash2
@@ -239,7 +249,7 @@ Les flags générés sont alors : `--speculative-algorithm DFLASH
 et `--speculative-eagle-topk` sont retirés automatiquement). Le draft est
 chargé depuis le cache HF local monté (aucun téléchargement).
 
-Pour revenir à EAGLE : `SPEC_ALGORITHM=EAGLE` (et `SGLANG_IMAGE=lmsysorg/sglang:latest` si besoin).
+Pour revenir à EAGLE : `SPEC_ALGORITHM=EAGLE` (et `SGLANG_DOCKER_IMAGE=lmsysorg/sglang:latest` si besoin).
 
 ### Mode natif (venv)
 
@@ -264,13 +274,17 @@ surchargeable via `DRAFT_MODEL_PATH` / `DRAFT_REPO_DIR`) et affiche un
   Blackwell. Les kernels utilisés (Triton, conv groupée via `torch.compile`)
   ne sont pas limités à une architecture, mais les perfs ne sont pas garanties
   — mesurer avec `bench_stream.py` / `bench.py` et comparer à EAGLE.
-- **VRAM** : le draft (3,6 Go) s'ajoute au modèle. **`MEM_FRACTION=0.95` OOM
-  immédiat** sous charge ; **0.90 OOM encore** : les **kernels Triton JIT se
-  chargent à la volée** pendant le service (prompts longs → `chunk_gated_…`,
-  `_causal_conv1d_fwd`, `_fused_norm_rope_…`, ~1 Go consommé) et mangent la
-  marge. **`0.85` requis** (~2,4 Go/GPU de marge, KV ~150 K tokens) : stable
-  même après chargement des kernels JIT + concurrence 4. Le KV cache du draft
-  suit `--kv-cache-dtype` (déjà `fp8_e4m3`, ce qui divise par 2 le pool draft).
+- **VRAM / contexte — le vrai arbitrage** : le draft (3,6 Go) réduit le pool
+  KV. **DFLASH2 : pool ~96 K tokens max** (SGLANG_MEM_FRACTION=0.88 obligatoire :
+  0.95 = OOM immédiat, 0.90 = OOM quand les kernels Triton JIT se chargent en
+  service). **EAGLE : pool ~226 K tokens** à 0.95 (validé : requête de
+  200 K tokens OK). Au-delà du pool, SGLang **rejette en HTTP 400** à
+  l'admission (input > max) — le serveur ne crashe pas.
+
+| Mode | Pool KV | Contexte max réel | Débit (code) |
+|---|---|---|---|
+| **EAGLE** (défaut, priorité contexte) | ~226 K | ~220 K tokens | ~141 tok/s |
+| **DFLASH2** (priorité vitesse) | ~96 K | ~90 K tokens | ~133-141 tok/s |
 - **TP=2** : le worker draft est compatible TP, mais seul le TP=1 a été
   mesuré par le cookbook.
 
@@ -348,12 +362,12 @@ Débit net (méthode delta 2 appels, `bench.py`) :
 | `FileNotFoundError: 'ninja'` au boot | `.venv/bin` absent du PATH (corrigé dans `start.sh`) |
 | `pidfd_getfd: Operation not permitted` | transport multimodal CUDA IPC bloqué → `--mm-feature-transport cpu` (déjà en place) |
 | `Custom allreduce failed` (warning) | normal sans NVLink sur 3090 → `--disable-custom-all-reduce` (déjà en place) |
-| `MODEL_ROOT` non défini (Docker) | `docker compose` refuse de démarrer → copier `.env.example` en `.env` et renseigner `MODEL_ROOT` |
-| `ValueError: Unrecognized model in /models` (Docker) | montage du snapshot seul → liens `../../blobs` cassés ; monter le dossier **parent** (`MODEL_ROOT`) |
+| `SGLANG_MODEL_ROOT` non défini (Docker) | `docker compose` refuse de démarrer → copier `.env.example` en `.env` et renseigner `SGLANG_MODEL_ROOT` |
+| `ValueError: Unrecognized model in /models` (Docker) | montage du snapshot seul → liens `../../blobs` cassés ; monter le dossier **parent** (`SGLANG_MODEL_ROOT`) |
 | Boot Docker ~5 min à froid | compilation JIT Triton dans le conteneur (pas de cache `/root/.triton` persisté entre `down`/`up`) |
-| Port `1234` déjà utilisé | serveur venv encore actif → `./stop.sh`, ou changer `PORT` dans `.env` |
-| OOM au démarrage | baisser `MEM_FRACTION` (ex. `0.90`) ou réduire `CONTEXT_LENGTH` |
-| MTP + flashinfer plante au boot | relancer avec `ATTN_BACKEND=triton ./start.sh` |
+| Port `1234` déjà utilisé | serveur venv encore actif → `./stop.sh`, ou changer `SGLANG_PORT` dans `.env` |
+| OOM au démarrage | baisser `SGLANG_MEM_FRACTION` (ex. `0.90`) ou réduire `SGLANG_CONTEXT_LENGTH` |
+| MTP + flashinfer plante au boot | relancer avec `SGLANG_ATTN_BACKEND=triton ./start.sh` |
 | Crash `AssertionError: Can not alloc mamba cache` (SIGQUIT) | pool GDN saturé au handoff radix (gros prompts, préfixe verrouillé) → augmenter `SGLANG_MAMBA_CACHE_SIZE` (8 par défaut ; 16 = plus sûr, KV ~188 K) |
 | `docker compose ps` → `unhealthy` pendant une grosse requête | prefill très long (gros contexte, requête unique) : la boucle HTTP ne répond pas au healthcheck → temporaire et sans conséquence (pas de redémarrage sur unhealthy) ; se rétablit seul |
 
