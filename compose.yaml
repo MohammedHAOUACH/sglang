@@ -11,7 +11,11 @@
 #
 # Image officielle SGLang (Docker Hub) : lmsysorg/sglang
 #   - "latest"          = dernier stable, CUDA 13, outils de build inclus
-#     (nécessaire : compilation JIT des kernels GPTQ-Marlin au 1er boot)
+#     (nécessaire : compilation JIT des kernels GPTQ-Marlin au 1er boot).
+#     ⚠️ PAS de DFLASH2 : aucune release ne contient encore le sélecteur
+#     DFLASH2 (landed après 0.5.17, PR #35371 + #35496).
+#   - "dev"             = build roulant depuis main → contient DFLASH2.
+#     À utiliser pour le décodage spéculatif DFLASH2 (voir SPEC_ALGORITHM).
 #   - "latest-runtime"  = plus léger (~40 %) mais SANS outils de build
 #   - "latest-cu129"    = variante CUDA 12.9 (driver hôte < 580)
 #
@@ -19,15 +23,31 @@
 #   PORT (1234), HOST (0.0.0.0), TP (2), GPU_COUNT (2), CONTEXT_LENGTH
 #   (262144), MEM_FRACTION (0.95), MAX_CONCURRENT_REQUESTS (1),
 #   ATTN_BACKEND (flashinfer), SERVED_MODEL_NAME (qwen3.8-27b-int8-w8a16),
-#   MODEL_ROOT (OBLIGATOIRE), MODEL_SNAPSHOT (7c12373712d1363e2b76655cb3332c9c124627d7),
+#   MODEL_ROOT (OBLIGATOIRE — dossier parent du cache HF local, celui qui
+#     contient models--lued--... et models--z-lab--...), MODEL_SNAPSHOT
+#     (7c12373712d1363e2b76655cb3332c9c124627d7), MODEL_REPO_DIR
+#     (models--lued--Qwen3.8-27B-INT8-W8A16-MTP),
 #   SGLANG_MAMBA_CACHE_SIZE (8), SGLANG_IMAGE (lmsysorg/sglang:latest)
+#
+# Décodage spéculatif (voir README → « DFLASH2 (optionnel) ») :
+#   SPEC_ALGORITHM (EAGLE)      EAGLE = MTP in-checkpoint (défaut) ;
+#                               DFLASH = modèle draft externe DFlash2
+#   DRAFT_REPO_DIR (models--z-lab--Qwen3.8-27B-DFlash2), DRAFT_SNAPSHOT
+#     (50307d4c4cde6860d4eee73e2547cd786fe8e8a4)   draft local (monté, aucun
+#     téléchargement) — utilisés seulement si SPEC_ALGORITHM=DFLASH
+#   SPEC_NUM_STEPS (3), SPEC_EAGLE_TOPK (1)         uniquement EAGLE
+#   SPEC_NUM_DRAFT_TOKENS (4 pour EAGLE, 8 pour DFLASH — block size DFlash2)
+#
+# Tout est chargé depuis le cache HF local monté en lecture seule : le modèle
+# cible ET le draft DFlash2. Aucun téléchargement au boot.
 # ============================================================================
 
 name: sglang-qwen3
 
 services:
   sglang:
-    # Tag d'image surchargeable (mise à jour SGLang = changer ici ou dans .env)
+    # Tag d'image surchargeable (mise à jour SGLang = changer ici ou dans .env).
+    # DFLASH2 ⇒ SGLANG_IMAGE=lmsysorg/sglang:dev (build de main).
     image: "${SGLANG_IMAGE:-lmsysorg/sglang:latest}"
     container_name: sglang-qwen3
     restart: unless-stopped
@@ -47,12 +67,13 @@ services:
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       TOKENIZERS_PARALLELISM: "false"
 
-    # Modèle local monté en lecture seule. On monte le DOSSIER PARENT
-    # (models--lued--...) et non le snapshot : les fichiers du snapshot sont
-    # des liens symboliques relatifs vers ../../blobs/... qui doivent rester
-    # résolus dans le conteneur.
+    # Cache Hugging Face local monté en lecture seule : le DOSSIER PARENT qui
+    # contient models--lued--... (modèle cible) ET models--z-lab--... (draft
+    # DFLASH2). On monte le parent et non le snapshot : les fichiers des
+    # snapshots sont des liens symboliques relatifs vers ../../blobs/... qui
+    # doivent rester résolus dans le conteneur. Aucun téléchargement au boot.
     volumes:
-      - "${MODEL_ROOT:?MODEL_ROOT doit être défini — copier .env.example vers .env et adapter le chemin du modèle}:/models:ro"
+      - "${MODEL_ROOT:?MODEL_ROOT doit être défini — copier .env.example vers .env et pointer vers le dossier parent du cache HF (celui qui contient models--lued--... et models--z-lab--...)}:/models:ro"
 
     ports:
       - "${PORT:-1234}:${PORT:-1234}"
@@ -67,68 +88,48 @@ services:
               capabilities: [gpu]
 
     # ====== Équivalent de start.sh (python -m sglang.launch_server) ======
+    # Enveloppe bash pour construire les arguments du décodage spéculatif
+    # selon SPEC_ALGORITHM (EAGLE = MTP in-checkpoint, DFLASH = draft externe).
+    # NB : ${VAR} est interpolé par docker compose (mêmes valeurs que .env) ;
+    # $${VAR} échappe l'interpolation → expansion bash locale.
     command:
-      - python3
-      - -m
-      - sglang.launch_server
-      - --model-path
-      - "/models/snapshots/${MODEL_SNAPSHOT:-7c12373712d1363e2b76655cb3332c9c124627d7}"
-      - --served-model-name
-      - "${SERVED_MODEL_NAME:-qwen3.8-27b-int8-w8a16}"
-      - --tp-size
-      - "${TP:-2}"
-      - --trust-remote-code
-      - --dtype
-      - bfloat16
-      - --disable-custom-all-reduce
-      - --mm-feature-transport
-      - cpu
-      - --mem-fraction-static
-      - "${MEM_FRACTION:-0.95}"
-      - --attention-backend
-      - "${ATTN_BACKEND:-flashinfer}"
-      - --chunked-prefill-size
-      - "8192"
-      - --disable-prefill-cuda-graph
-      - --kv-cache-dtype
-      - fp8_e4m3
-      - --mamba-ssm-dtype
-      - bfloat16
-      - --mamba-full-memory-ratio
-      - "4.21"
-      - --mamba-radix-cache-strategy
-      - extra_buffer_lazy
-      # 8 = 4 slots/requête (concurrence 1) + 4 de marge radix : le handoff
-      # du cache radix exige un slot Mamba supplémentaire, et avec 4 slots
-      # seulement l'éviction échoue quand le préfixe partagé verrouille tous
-      # les états (crash "Can not alloc mamba cache", SIGQUIT).
-      # Chaque slot coûte ~0,07 Go : 8 → KV ~226 K tokens, 16 → ~188 K.
-      # Variable préfixée SGLANG_ : le shell prime sur .env dans docker compose,
-      # donc un export MAMBA_CACHE_SIZE=4 dans le shell écraserait cette valeur.
-      - --max-mamba-cache-size
-      - "${SGLANG_MAMBA_CACHE_SIZE:-8}"
-      - --max-running-requests
-      - "${MAX_CONCURRENT_REQUESTS:-1}"
-      - --context-length
-      - "${CONTEXT_LENGTH:-262144}"
-      - --speculative-algorithm
-      - EAGLE
-      - --speculative-num-steps
-      - "3"
-      - --speculative-eagle-topk
-      - "1"
-      - --speculative-num-draft-tokens
-      - "4"
-      - --reasoning-parser
-      - qwen3
-      - --tool-call-parser
-      - qwen3_coder
-      - --sampling-defaults
-      - model
-      - --host
-      - "${HOST:-0.0.0.0}"
-      - --port
-      - "${PORT:-1234}"
+      - /bin/bash
+      - -c
+      - |
+        set -euo pipefail
+        EXTRA_SPEC_ARGS=""
+        if [ "${SPEC_ALGORITHM:-EAGLE}" = "DFLASH" ]; then
+          # Draft local (monté depuis MODEL_ROOT) : snapshot z-lab DFlash2.
+          EXTRA_SPEC_ARGS="--speculative-draft-model-path /models/${DRAFT_REPO_DIR:-models--z-lab--Qwen3.8-27B-DFlash2}/snapshots/${DRAFT_SNAPSHOT:-50307d4c4cde6860d4eee73e2547cd786fe8e8a4} --speculative-num-draft-tokens ${SPEC_NUM_DRAFT_TOKENS:-8}"
+        else
+          EXTRA_SPEC_ARGS="--speculative-num-steps ${SPEC_NUM_STEPS:-3} --speculative-eagle-topk ${SPEC_EAGLE_TOPK:-1} --speculative-num-draft-tokens ${SPEC_NUM_DRAFT_TOKENS:-4}"
+        fi
+        exec python3 -m sglang.launch_server \
+          --model-path "/models/${MODEL_REPO_DIR:-models--lued--Qwen3.8-27B-INT8-W8A16-MTP}/snapshots/${MODEL_SNAPSHOT:-7c12373712d1363e2b76655cb3332c9c124627d7}" \
+          --served-model-name "${SERVED_MODEL_NAME:-qwen3.8-27b-int8-w8a16}" \
+          --tp-size "${TP:-2}" \
+          --trust-remote-code \
+          --dtype bfloat16 \
+          --disable-custom-all-reduce \
+          --mm-feature-transport cpu \
+          --mem-fraction-static "${MEM_FRACTION:-0.95}" \
+          --attention-backend "${ATTN_BACKEND:-flashinfer}" \
+          --chunked-prefill-size 8192 \
+          --disable-prefill-cuda-graph \
+          --kv-cache-dtype fp8_e4m3 \
+          --mamba-ssm-dtype bfloat16 \
+          --mamba-full-memory-ratio 4.21 \
+          --mamba-radix-cache-strategy extra_buffer_lazy \
+          --max-mamba-cache-size "${SGLANG_MAMBA_CACHE_SIZE:-8}" \
+          --max-running-requests "${MAX_CONCURRENT_REQUESTS:-1}" \
+          --context-length "${CONTEXT_LENGTH:-262144}" \
+          --speculative-algorithm "${SPEC_ALGORITHM:-EAGLE}" \
+          $${EXTRA_SPEC_ARGS} \
+          --reasoning-parser qwen3 \
+          --tool-call-parser qwen3_coder \
+          --sampling-defaults model \
+          --host "${HOST:-0.0.0.0}" \
+          --port "${PORT:-1234}"
 
     # 1er boot = compilation JIT + capture CUDA graphs (~5 min à froid).
     # NB : pendant un prefill très long (gros contexte, requête unique), la

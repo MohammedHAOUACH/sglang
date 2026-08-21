@@ -25,7 +25,7 @@ adaptée ici au hardware **2× RTX 3090 (Ampere, 48 Go)** au lieu du DGX Spark (
 | Parallélisme | Tensor Parallel = 2 (`--tp-size 2`) |
 | Contexte servi | 262 144 tokens (natif) — pool KV ≈ **245 000 tokens** |
 | KV cache | FP8 (`fp8_e4m3`) |
-| Décodage spéculatif | MTP (EAGLE 3 steps / topk 1 / 4 draft tokens) |
+| Décodage spéculatif | MTP (EAGLE 3 steps / topk 1 / 4 draft tokens) — option DFLASH2 disponible (voir plus bas) |
 | Thinking | ON par défaut (désactivable par requête) |
 | Port | **1234** |
 
@@ -109,16 +109,19 @@ curl -s http://127.0.0.1:1234/health # -> 200
   (message d'erreur explicite).
 - Le conteneur réserve **2 GPU** (TP=2) et expose le port `1234` ; il reprend
   les mêmes réglages NCCL que `start.sh` (`NCCL_P2P_DISABLE=1`, etc.).
-- Le modèle est monté en **lecture seule** depuis le cache HF local (aucun
-  re-téléchargement). On monte le **dossier parent** `models--lued--...` et
-  non le snapshot : les fichiers du snapshot sont des liens symboliques
-  relatifs vers `../../blobs/...` qui doivent rester résolus dans le conteneur.
+- Les modèles sont montés en **lecture seule** depuis le cache HF local
+  (aucun re-téléchargement). `MODEL_ROOT` pointe sur le **dossier parent du
+  cache HF**, celui qui contient `models--lued--...` (cible) **et**
+  `models--z-lab--...` (draft DFLASH2) ; on monte le parent et non le
+  snapshot : les fichiers des snapshots sont des liens symboliques relatifs
+  vers `../../blobs/...` qui doivent rester résolus dans le conteneur.
 - Le 1er boot compile les kernels Triton en JIT puis capture les CUDA graphs
   (~5 min, GPU inactif pendant la compilation). Un healthcheck `/health` est
   intégré (`docker compose ps` → `healthy`).
 - Image `latest` = CUDA 13 avec outils de build, nécessaire à la compilation
   JIT (l'image `latest-runtime`, ~40 % plus légère, ne peut pas compiler ;
-  variante CUDA 12 : `latest-cu129`).
+  variante CUDA 12 : `latest-cu129`). **DFLASH2 exige un build de main**
+  (voir la section dédiée plus bas).
 
 ### Variables (`.env`)
 
@@ -141,9 +144,15 @@ cp .env.example .env
 | `MAX_CONCURRENT_REQUESTS` | `1` | Requêtes concurrentes |
 | `ATTN_BACKEND` | `flashinfer` | `triton` en repli si MTP+flashinfer plante au boot |
 | `SERVED_MODEL_NAME` | `qwen3.8-27b-int8-w8a16` | Nom exposé par l'API |
-| `MODEL_ROOT` | **obligatoire** | Dossier parent du modèle dans le cache HF (monté dans `/models`) |
-| `MODEL_SNAPSHOT` | hash du snapshot | Sous-dossier pointé par `--model-path` |
+| `MODEL_ROOT` | **obligatoire** | Dossier parent du **cache HF** (celui qui contient `models--lued--...` et `models--z-lab--...`) — monté dans `/models` |
+| `MODEL_REPO_DIR` | `models--lued--Qwen3.8-27B-INT8-W8A16-MTP` | Sous-dossier du modèle cible dans `MODEL_ROOT` |
+| `MODEL_SNAPSHOT` | hash du snapshot | Snapshot du modèle cible pointé par `--model-path` |
 | `SGLANG_MAMBA_CACHE_SIZE` | `8` | Slots du cache GDN (concurrence × 4 + 4 de marge radix) — 16 → KV ~188 K (plus sûr), 4 → KV ~245 K (crash possible). Préfixe `SGLANG_` : évite qu'un export shell de `MAMBA_CACHE_SIZE` n'écrase la valeur de `.env` |
+| `SPEC_ALGORITHM` | `EAGLE` | Décodage spéculatif : `EAGLE` (MTP in-checkpoint, défaut) ou `DFLASH` (draft externe DFlash2 — exige une image de main, voir section DFLASH2) |
+| `DRAFT_REPO_DIR` | `models--z-lab--Qwen3.8-27B-DFlash2` | Sous-dossier du draft DFlash2 dans `MODEL_ROOT` — utilisé seulement si `SPEC_ALGORITHM=DFLASH` |
+| `DRAFT_SNAPSHOT` | `50307d4c4cde6860d4eee73e2547cd786fe8e8a4` | Snapshot du draft DFlash2 pointé par `--speculative-draft-model-path` |
+| `SPEC_NUM_STEPS` / `SPEC_EAGLE_TOPK` | `3` / `1` | Paramètres EAGLE uniquement (ignorés en DFLASH) |
+| `SPEC_NUM_DRAFT_TOKENS` | `4` (EAGLE) / `8` (DFLASH) | Tokens draftés par pas ; en DFLASH, 8 = block size du draft |
 
 > ⚠️ Ne pas faire tourner le venv **et** le conteneur en même temps : le port
 > `1234` ne peut pas être partagé (`./stop.sh` ou changer `PORT` dans `.env`).
@@ -171,6 +180,95 @@ Exemple — 2 requêtes concurrentes (moins de contexte par requête) :
 ```bash
 MAX_CONCURRENT_REQUESTS=2 ./start.sh
 ```
+
+---
+
+## DFLASH2 (optionnel)
+
+[DFLASH2](https://github.com/sgl-project/sglang/pull/35663) est une variante
+plus récente du décodage spéculatif de SGLang pour Qwen3.8-27B : un **modèle
+draft externe** (`incoai/Qwen3.8-27B-DFlash2`, diffusion par blocs) remplace
+le MTP in-checkpoint (EAGLE). C'est la recette du cookbook officiel SGLang
+(Qwen3.8-27B, cellule « DFLASH2 ») — elle vise surtout Blackwell (RTX 5090 /
+RTX PRO 6000), où elle bat EAGLE en acceptation (~3 tokens/bloc au lieu de
+~2,5) au prix d'une VRAM légèrement plus élevée.
+
+### Prérequis : un SGLang de `main`
+
+DFLASH2 a été ajouté dans les PRs [#35371](https://github.com/sgl-project/sglang/pull/35371)
+(draft DFlash2) et [#35496](https://github.com/sgl-project/sglang/pull/35496)
+(lm_head quantisé) — **toutes deux postérieures à la dernière release
+(0.5.17)**. L'image `lmsysorg/sglang:latest` ne le contient pas.
+
+**Option rapide — image `dev` (build roulant de main) :**
+
+```bash
+# dans .env
+SGLANG_IMAGE=lmsysorg/sglang:dev
+```
+
+**Option figée — build local au commit validé par le cookbook** (~1-2 h,
+reproductible) :
+
+```bash
+git clone https://github.com/sgl-project/sglang.git && cd sglang
+git checkout 1cf2b8c54d81802abc15dcf23a29b9cc687bc01e   # PR #35496
+docker build -t sglang:dflash2 -f docker/Dockerfile .
+# puis dans .env : SGLANG_IMAGE=sglang:dflash2
+```
+
+> Si le boot échoue sur l'image `dev` (outils de build manquants pour la
+> compilation JIT GPTQ-Marlin), repasser au build figé ci-dessus.
+
+### Activer DFLASH2
+
+```bash
+# dans .env
+SGLANG_IMAGE=lmsysorg/sglang:dev
+SPEC_ALGORITHM=DFLASH
+# Draft local (déjà dans code/vllm/models) — défauts dans compose.yaml :
+# DRAFT_REPO_DIR=models--z-lab--Qwen3.8-27B-DFlash2
+# DRAFT_SNAPSHOT=50307d4c4cde6860d4eee73e2547cd786fe8e8a4
+
+docker compose up -d --force-recreate
+```
+
+Les flags générés sont alors : `--speculative-algorithm DFLASH
+--speculative-draft-model-path /models/models--z-lab--Qwen3.8-27B-DFlash2/snapshots/<hash>
+--speculative-num-draft-tokens 8` (les flags EAGLE `--speculative-num-steps`
+et `--speculative-eagle-topk` sont retirés automatiquement). Le draft est
+chargé depuis le cache HF local monté (aucun téléchargement).
+
+Pour revenir à EAGLE : `SPEC_ALGORITHM=EAGLE` (et `SGLANG_IMAGE=lmsysorg/sglang:latest` si besoin).
+
+### Mode natif (venv)
+
+Le venv créé depuis `requirements.txt` est figé sur `sglang==0.5.17` : **pas de
+DFLASH**. Pour l'utiliser en mode natif, réinstaller SGLang depuis les sources
+(dans le venv) :
+
+```bash
+git clone https://github.com/sgl-project/sglang.git && cd sglang
+git checkout 1cf2b8c54d81802abc15dcf23a29b9cc687bc01e
+~/.local/bin/python3.11 -m pip install -e "python[all]"
+```
+
+puis `SPEC_ALGORITHM=DFLASH ./start.sh`. `start.sh` auto-détecte le draft
+(`../vllm/models/models--z-lab--Qwen3.8-27B-DFlash2/snapshots/*/`,
+surchargeable via `DRAFT_MODEL_PATH` / `DRAFT_REPO_DIR`) et affiche un
+ avertissement si le venv ne contient pas un SGLang de main.
+
+### Limites sur 2× RTX 3090
+
+- **Non validé sur Ampere (SM86)** : le cookbook n'a exercé DFLASH2 que sur
+  Blackwell. Les kernels utilisés (Triton, conv groupée via `torch.compile`)
+  ne sont pas limités à une architecture, mais les perfs ne sont pas garanties
+  — mesurer avec `bench_stream.py` / `bench.py` et comparer à EAGLE.
+- **VRAM** : le draft s'ajoute au modèle. Si OOM au boot ou en graph capture,
+  baisser `MEM_FRACTION` (ex. `0.90`, puis `0.85`). Le KV cache du draft suit
+  `--kv-cache-dtype` (déjà `fp8_e4m3`, ce qui divise par 2 le pool draft).
+- **TP=2** : le worker draft est compatible TP, mais seul le TP=1 a été
+  mesuré par le cookbook.
 
 ---
 
