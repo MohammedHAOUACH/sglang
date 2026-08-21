@@ -140,7 +140,7 @@ cp .env.example .env
 | `TP` | `2` | Taille du tensor parallel |
 | `GPU_COUNT` | `2` | GPU exposés au conteneur (doit valoir `TP`) |
 | `CONTEXT_LENGTH` | `262144` | Contexte natif max du modèle |
-| `MEM_FRACTION` | `0.95` | Fraction de VRAM réservée |
+| `MEM_FRACTION` | `0.90` | Fraction de VRAM réservée — 0.95 OK en EAGLE ; **0.90 requis avec DFLASH2** (draft 3,6 Go → 0.95 = OOM sous charge, ~0 Mo de marge) |
 | `MAX_CONCURRENT_REQUESTS` | `1` | Requêtes concurrentes |
 | `ATTN_BACKEND` | `flashinfer` | `triton` en repli si MTP+flashinfer plante au boot |
 | `SERVED_MODEL_NAME` | `qwen3.8-27b-int8-w8a16` | Nom exposé par l'API |
@@ -264,8 +264,10 @@ surchargeable via `DRAFT_MODEL_PATH` / `DRAFT_REPO_DIR`) et affiche un
   Blackwell. Les kernels utilisés (Triton, conv groupée via `torch.compile`)
   ne sont pas limités à une architecture, mais les perfs ne sont pas garanties
   — mesurer avec `bench_stream.py` / `bench.py` et comparer à EAGLE.
-- **VRAM** : le draft s'ajoute au modèle. Si OOM au boot ou en graph capture,
-  baisser `MEM_FRACTION` (ex. `0.90`, puis `0.85`). Le KV cache du draft suit
+- **VRAM** : le draft (3,6 Go) s'ajoute au modèle. **`MEM_FRACTION=0.95` OOM
+  sous charge** (buffers transitoires des kernels GDN : `wy_fast`,
+  `triton_gdn_fused_proj`) → **`0.90` requis** (~1,2 Go/GPU de marge, KV
+  ~165 K tokens au lieu de ~177 K). Le KV cache du draft suit
   `--kv-cache-dtype` (déjà `fp8_e4m3`, ce qui divise par 2 le pool draft).
 - **TP=2** : le worker draft est compatible TP, mais seul le TP=1 a été
   mesuré par le cookbook.
