@@ -72,6 +72,10 @@ services:
       NCCL_CUMEM_ENABLE: "0"
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       TOKENIZERS_PARALLELISM: "false"
+      # Caches JIT explicités (défauts implicites sinon) : pointés vers les
+      # volumes nommés ci-dessous pour survivre à un down/up.
+      TRITON_CACHE_DIR: "/root/.triton"
+      FLASHINFER_CACHE_DIR: "/root/.cache/flashinfer"
 
     # Cache Hugging Face local monté en lecture seule : le DOSSIER PARENT qui
     # contient models--lued--... (modèle cible) ET models--z-lab--... (draft
@@ -80,6 +84,13 @@ services:
     # doivent rester résolus dans le conteneur. Aucun téléchargement au boot.
     volumes:
       - "${SGLANG_MODEL_ROOT:?SGLANG_MODEL_ROOT doit être défini — copier .env.example vers .env et pointer vers le dossier parent du cache HF (celui qui contient models--lued--... et models--z-lab--...)}:/models:ro"
+      # Caches JIT persistés sur l'hôte : sans eux, chaque `docker compose up`
+      # (recreate) retélécharge ~877 Mo de kernels flash-attn3 précompilés
+      # depuis le HF hub (kernels-community/sgl-flash-attn3) et recompile
+      # Triton/FlashInfer/tvm-ffi → CUDA graph capture ~230 s au lieu de ~3 s.
+      # Les volumes se peuplent au 1er boot, puis sont réutilisés tels quels.
+      - sglang-cache:/root/.cache
+      - triton-cache:/root/.triton
 
     ports:
       - "${SGLANG_PORT:-1234}:${SGLANG_PORT:-1234}"
@@ -155,3 +166,12 @@ services:
       options:
         max-size: "50m"
         max-file: "3"
+
+# Volumes nommés persistants : les caches JIT (flash-attn3 du HF hub dans
+# /root/.cache, Triton dans /root/.triton) survivent aux recréations de
+# conteneur (down/up) — sinon chaque boot froid retélécharge ~877 Mo de
+# kernels et recompile (~4-5 min au lieu de ~30 s). Supprimer un volume
+# pour forcer un re-téléchargement/recompilation.
+volumes:
+  sglang-cache:
+  triton-cache:

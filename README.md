@@ -115,8 +115,14 @@ curl -s http://127.0.0.1:1234/health # -> 200
   `models--z-lab--...` (draft DFLASH2) ; on monte le parent et non le
   snapshot : les fichiers des snapshots sont des liens symboliques relatifs
   vers `../../blobs/...` qui doivent rester résolus dans le conteneur.
-- Le 1er boot compile les kernels Triton en JIT puis capture les CUDA graphs
-  (~5 min, GPU inactif pendant la compilation). Un healthcheck `/health` est
+- Le 1er boot retélécharge ~877 Mo de kernels flash-attn3 précompilés depuis
+  le HF hub (`kernels-community/sgl-flash-attn3`) puis compile/capture les
+  CUDA graphs (~5 min à froid, GPU inactif pendant ce temps). Ces caches JIT
+  sont **persistés dans des volumes nommés** (`sglang-cache` → `/root/.cache`
+  qui contient les kernels flash-attn3, FlashInfer et tvm-ffi ;
+  `triton-cache` → `/root/.triton`) : seuls le tout premier boot ou une
+  suppression de volume re-téléchargent/recompilent — les redémarrages et
+  `down`/`up` suivants démarrent en ~30-40 s. Un healthcheck `/health` est
   intégré (`docker compose ps` → `healthy`).
 - Image `latest` = CUDA 13 avec outils de build, nécessaire à la compilation
   JIT (l'image `latest-runtime`, ~40 % plus légère, ne peut pas compiler ;
@@ -366,7 +372,7 @@ Débit net (méthode delta 2 appels, `bench.py`) :
 | `Custom allreduce failed` (warning) | normal sans NVLink sur 3090 → `--disable-custom-all-reduce` (déjà en place) |
 | `SGLANG_MODEL_ROOT` non défini (Docker) | `docker compose` refuse de démarrer → copier `.env.example` en `.env` et renseigner `SGLANG_MODEL_ROOT` |
 | `ValueError: Unrecognized model in /models` (Docker) | montage du snapshot seul → liens `../../blobs` cassés ; monter le dossier **parent** (`SGLANG_MODEL_ROOT`) |
-| Boot Docker ~5 min à froid | compilation JIT Triton dans le conteneur (pas de cache `/root/.triton` persisté entre `down`/`up`) |
+| Boot Docker ~5 min au 1er boot | SGLang retélécharge ~877 Mo de kernels flash-attn3 précompilés depuis le HF hub (`kernels-community/sgl-flash-attn3` → `/root/.cache/huggingface`) + compile Triton/FlashInfer/tvm-ffi. Depuis compose.yaml, `/root/.cache` et `/root/.triton` sont persistés en volumes nommés (`sglang-cache`, `triton-cache`). Seul le tout premier boot (ou `docker volume rm sglang-cache triton-cache`) re-télécharge ; les démarrages suivants prennent ~30-40 s |
 | Port `1234` déjà utilisé | serveur venv encore actif → `./stop.sh`, ou changer `SGLANG_PORT` dans `.env` |
 | OOM au démarrage | baisser `SGLANG_MEM_FRACTION` (ex. `0.90`) ou réduire `SGLANG_CONTEXT_LENGTH` |
 | MTP + flashinfer plante au boot | relancer avec `SGLANG_ATTN_BACKEND=triton ./start.sh` |
